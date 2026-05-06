@@ -1,0 +1,422 @@
+"""
+模块一：数据处理与特征工程
+基于 NYC Yellow Taxi 2023年1月数据
+功能：加载数据 → 生成质量报告 → 清洗数据 → 特征工程
+"""
+
+import pandas as pd
+import numpy as np
+import os
+import warnings
+
+warnings.filterwarnings('ignore')
+
+
+class DataProcessor:
+    """数据处理类，负责加载、清洗、特征工程"""
+
+    def __init__(self, data_dir='data', output_dir='outputs'):
+        """
+        初始化数据处理器
+
+        参数:
+            data_dir: 原始数据所在目录（相对路径）
+            output_dir: 输出目录（相对路径）
+        """
+        self.data_dir = data_dir
+        self.output_dir = output_dir
+        self.df = None
+        self.quality_report = {}
+
+        # 确保输出目录存在
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def load_data(self, filename='yellow_tripdata_2023-01.parquet'):
+        """
+        第一阶段：数据加载
+
+        参数:
+            filename: 数据文件名
+
+        返回:
+            DataFrame: 加载的原始数据
+        """
+        print("=" * 60)
+        print("第一阶段：数据加载")
+        print("=" * 60)
+
+        filepath = os.path.join(self.data_dir, filename)
+        print(f"从 {filepath} 读取数据...")
+
+        self.df = pd.read_parquet(filepath)
+        print(f"原始数据量: {len(self.df):,} 条")
+        print(f"字段数量: {len(self.df.columns)} 个")
+        print(f"\n字段列表及数据类型:")
+        print(self.df.dtypes)
+
+        return self.df
+
+    def generate_quality_report(self):
+        """
+        第二阶段：生成数据质量报告
+
+        返回:
+            dict: 包含缺失值和异常值统计的报告
+        """
+        print("\n" + "=" * 60)
+        print("第二阶段：数据质量报告")
+        print("=" * 60)
+
+        df = self.df
+        total_records = len(df)
+        report = {'missing': {}, 'anomalies': {}}
+
+        # --- 缺失值统计 ---
+        print("\n【缺失值统计】")
+        missing = df.isnull().sum()
+        missing_pct = (missing / total_records * 100).round(3)
+
+        has_missing = False
+        for col in df.columns:
+            if missing[col] > 0:
+                has_missing = True
+                report['missing'][col] = {
+                    'count': int(missing[col]),
+                    'percentage': float(missing_pct[col])
+                }
+                print(f"  {col}: {missing[col]:,} 条缺失 ({missing_pct[col]:.3f}%)")
+
+        if not has_missing:
+            print("  ✓ 所有字段均无缺失值")
+
+        # --- 异常值检测 ---
+        print("\n【异常值统计】")
+
+        # 车费异常
+        # 理由：车费为负或为0但距离不为0，属于无效行程记录
+        fare_negative = int((df['fare_amount'] < 0).sum())
+        fare_zero_dist_pos = int(((df['fare_amount'] == 0) & (df['trip_distance'] > 0)).sum())
+        print(f"  车费为负: {fare_negative:,} 条 ({fare_negative / total_records * 100:.3f}%)")
+        print(f"  车费为0但距离>0: {fare_zero_dist_pos:,} 条 ({fare_zero_dist_pos / total_records * 100:.3f}%)")
+        report['anomalies']['fare_negative'] = fare_negative
+        report['anomalies']['fare_zero_distance_positive'] = fare_zero_dist_pos
+
+        # 总费用异常
+        total_negative = int((df['total_amount'] < 0).sum())
+        print(f"  总费用为负: {total_negative:,} 条 ({total_negative / total_records * 100:.3f}%)")
+        report['anomalies']['total_negative'] = total_negative
+
+        # 距离异常
+        distance_zero = int((df['trip_distance'] == 0).sum())
+        distance_negative = int((df['trip_distance'] < 0).sum())
+        distance_over_100 = int((df['trip_distance'] > 100).sum())
+        print(f"  距离为0: {distance_zero:,} 条 ({distance_zero / total_records * 100:.3f}%)")
+        print(f"  距离为负: {distance_negative:,} 条 ({distance_negative / total_records * 100:.3f}%)")
+        print(f"  距离>100英里: {distance_over_100:,} 条 ({distance_over_100 / total_records * 100:.3f}%)")
+        report['anomalies']['distance_zero'] = distance_zero
+        report['anomalies']['distance_negative'] = distance_negative
+        report['anomalies']['distance_over_100'] = distance_over_100
+
+        # 时间异常：先预计算行程时长用于检测
+        pickup_dt = pd.to_datetime(df['tpep_pickup_datetime'])
+        dropoff_dt = pd.to_datetime(df['tpep_dropoff_datetime'])
+        trip_duration = (dropoff_dt - pickup_dt).dt.total_seconds() / 60  # 分钟
+
+        duration_zero_or_negative = int((trip_duration <= 0).sum())
+        duration_too_short = int(((trip_duration > 0) & (trip_duration < 1)).sum())
+        duration_too_long = int((trip_duration > 720).sum())
+        print(
+            f"  行程时长<=0: {duration_zero_or_negative:,} 条 ({duration_zero_or_negative / total_records * 100:.3f}%)")
+        print(f"  行程时长<1分钟: {duration_too_short:,} 条 ({duration_too_short / total_records * 100:.3f}%)")
+        print(f"  行程时长>12小时: {duration_too_long:,} 条 ({duration_too_long / total_records * 100:.3f}%)")
+        report['anomalies']['duration_zero_or_negative'] = duration_zero_or_negative
+        report['anomalies']['duration_too_short'] = duration_too_short
+        report['anomalies']['duration_too_long'] = duration_too_long
+
+        # 乘客数异常
+        passenger_zero = int((df['passenger_count'] == 0).sum())
+        passenger_over_6 = int((df['passenger_count'] > 6).sum())
+        print(f"  乘客数为0: {passenger_zero:,} 条 ({passenger_zero / total_records * 100:.3f}%)")
+        print(f"  乘客数>6: {passenger_over_6:,} 条 ({passenger_over_6 / total_records * 100:.3f}%)")
+        report['anomalies']['passenger_zero'] = passenger_zero
+        report['anomalies']['passenger_over_6'] = passenger_over_6
+
+        # 质量报告总结
+        total_anomaly_records = sum(report['anomalies'].values())
+        print(f"\n【质量报告总结】")
+        print(f"  原始总记录数: {total_records:,}")
+        print(f"  各类异常记录数合计: {total_anomaly_records:,}（含重复计数）")
+        print(f"  将在清洗阶段逐条处理上述异常")
+
+        self.quality_report = report
+        return report
+
+    def clean_data(self):
+        """
+        第三阶段：数据清洗
+        每步清洗操作都有注释说明理由
+
+        返回:
+            DataFrame: 清洗后的数据
+        """
+        print("\n" + "=" * 60)
+        print("第三阶段：数据清洗")
+        print("=" * 60)
+
+        df = self.df
+        before_clean = len(df)
+        print(f"清洗前数据量: {before_clean:,} 条\n")
+
+        # 3.1 剔除车费异常的记录
+        # 理由：车费为负属于数据错误，车费为0但距离>0说明计费异常。
+        # 此类记录无法用于费用分析，且占比极低（通常<0.1%），删除不影响整体代表性。
+        before = len(df)
+        df = df[df['fare_amount'] > 0]
+        print(f"  剔除车费<=0: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        # 3.2 剔除总费用异常的记录
+        # 理由：总费用为负的数据逻辑不自洽，可能是系统错误或退款处理，
+        # 我们分析的是正常付费行程，故删除。
+        before = len(df)
+        df = df[df['total_amount'] > 0]
+        print(f"  剔除总费用<=0: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        # 3.3 剔除距离<=0的异常记录
+        # 理由：距离为0或负值不可能是真实行程，可能是GPS未启动或数据采集错误。
+        # 后续要做距离相关的特征和预测，此类数据无用。
+        before = len(df)
+        df = df[df['trip_distance'] > 0]
+        print(f"  剔除距离<=0: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        # 3.4 剔除距离过长记录
+        # 理由：超过100英里的行程在NYC出租车场景中极少见。
+        # 可能是跨州行程（极少见）或数据记录错误，会严重干扰速度和费用统计。
+        before = len(df)
+        df = df[df['trip_distance'] <= 100]
+        print(f"  剔除距离>100英里: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        # 3.5 转换时间格式
+        # 理由：后续需要基于时间做计算和特征提取，统一转为datetime类型。
+        df['tpep_pickup_datetime'] = pd.to_datetime(df['tpep_pickup_datetime'])
+        df['tpep_dropoff_datetime'] = pd.to_datetime(df['tpep_dropoff_datetime'])
+
+        # 3.6 剔除时间逻辑异常的记录
+        # 理由：下车时间早于或等于上车时间，数据明显错误，无法计算行程时长。
+        before = len(df)
+        df = df[df['tpep_dropoff_datetime'] > df['tpep_pickup_datetime']]
+        print(f"  剔除时长<=0: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        # 3.7 计算行程时长并剔除极端值
+        # 理由：
+        #   - 时长<1分钟：可能是误操作或技术错误，不反映真实出行
+        #   - 时长>12小时：极可能是司机忘记关表，不是一次连续行程
+        # 两种极端值都会严重扭曲平均速度统计和预测模型效果。
+        df['trip_duration_minutes'] = (
+                                              df['tpep_dropoff_datetime'] - df['tpep_pickup_datetime']
+                                      ).dt.total_seconds() / 60
+
+        before = len(df)
+        df = df[(df['trip_duration_minutes'] >= 1) & (df['trip_duration_minutes'] <= 720)]
+        print(f"  剔除时长异常: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        # 3.8 剔除乘客数异常的记录
+        # 理由：
+        #   - 乘客数为0：出租车不允许空驶计费，不符合运营逻辑
+        #   - 乘客数>6：标准轿车式出租车最多容纳4-5名乘客
+        #     超过6人极可能是输入错误或非标准载客情况
+        before = len(df)
+        df = df[(df['passenger_count'] >= 1) & (df['passenger_count'] <= 6)]
+        print(f"  剔除乘客数异常: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        # 3.9 处理缺失值
+        # 理由：检查关键字段是否有缺失。对于核心分析字段，
+        # 缺失会导致后续分析无法进行，故删除缺失行。
+        # 对于非关键字段（如RatecodeID），保留NaN由后续模块自行判断。
+        before = len(df)
+        critical_fields = ['tpep_pickup_datetime', 'tpep_dropoff_datetime',
+                           'trip_distance', 'fare_amount', 'total_amount',
+                           'PULocationID', 'DOLocationID', 'passenger_count']
+        df = df.dropna(subset=critical_fields)
+        print(f"  剔除关键字段缺失: {before - len(df):,} 条 → 剩余 {len(df):,} 条")
+
+        print(f"\n清洗后总数据量: {len(df):,} 条")
+        print(f"总删除记录数: {before_clean - len(df):,} 条")
+        print(f"删除比例: {(before_clean - len(df)) / before_clean * 100:.2f}%")
+
+        self.df = df
+        return df
+
+    def engineer_features(self):
+        """
+        第四阶段：特征工程
+        提取基础时间特征 + 2个衍生特征：
+          衍生特征1: 平均行程速度 (avg_speed_mph)
+          衍生特征2: 人均行程距离 (avg_distance_per_passenger)
+
+        返回:
+            DataFrame: 包含新特征的数据
+        """
+        print("\n" + "=" * 60)
+        print("第四阶段：特征工程")
+        print("=" * 60)
+
+        df = self.df
+
+        # ============================================
+        # 基础时间特征
+        # ============================================
+        print("\n【基础时间特征】")
+
+        # 小时（0-23）：用于分析日内出行规律，如早晚高峰的订单量变化
+        df['pickup_hour'] = df['tpep_pickup_datetime'].dt.hour
+
+        # 星期（0=周一, 6=周日）：用于区分工作日与周末的不同出行模式
+        df['pickup_dayofweek'] = df['tpep_pickup_datetime'].dt.dayofweek
+
+        # 是否周末：纽约周末夜生活、购物等出行场景与工作日差异明显
+        df['is_weekend'] = df['pickup_dayofweek'].isin([5, 6]).astype(int)
+
+        # 是否高峰时段
+        # 理由：基于纽约市通勤特征，早高峰7:00-9:00，晚高峰16:00-19:00。
+        # 晚高峰比一般城市延长1小时，考虑了纽约较长的下班和晚间活动时间。
+        df['is_peak_hour'] = df['pickup_hour'].apply(
+            lambda h: 1 if (7 <= h <= 9) or (16 <= h <= 19) else 0
+        )
+
+        # 时段分类：将一天分为5个有业务含义的时段
+        def classify_time_period(hour):
+            """将小时划分为五个时段，反映城市交通的不同阶段"""
+            if 0 <= hour < 6:
+                return '深夜'
+            elif 6 <= hour < 10:
+                return '早高峰'
+            elif 10 <= hour < 16:
+                return '白天非高峰'
+            elif 16 <= hour < 20:
+                return '晚高峰'
+            else:
+                return '夜间'
+
+        df['time_period'] = df['pickup_hour'].apply(classify_time_period)
+
+        print(f"  ✓ pickup_hour: 小时(0-23)")
+        print(f"  ✓ pickup_dayofweek: 星期(0=周一, 6=周日)")
+        print(f"  ✓ is_weekend: 是否周末 (0=否, 1=是)")
+        print(f"  ✓ is_peak_hour: 是否高峰 (0=否, 1=是)")
+        print(f"  ✓ time_period: 时段分类")
+
+        # ============================================
+        # 衍生特征1：平均行程速度 (mph)
+        # ============================================
+        # 设计理由：
+        #   1. 速度是最直观的交通拥堵衡量指标，可直接支撑"哪里最堵""什么时段最堵"等问答
+        #   2. 可与时段、是否高峰等交叉分析拥堵的时间分布规律
+        #   3. 极端速度值（过快或过慢）本身也能辅助发现数据质量问题
+        #   4. 在预测模型中可作为交通状态的先验特征
+        print("\n【衍生特征1：平均行程速度】")
+
+        # 速度 = 距离(英里) / 时长(小时)
+        df['avg_speed_mph'] = df['trip_distance'] / (df['trip_duration_minutes'] / 60)
+
+        # 将极端速度值替换为NaN，避免干扰统计
+        # 理由：速度>80mph在城市道路中不可能（除非数据错误）
+        # 速度<0.5mph且距离>1英里，可能是停车等人或数据异常
+        df.loc[df['avg_speed_mph'] > 80, 'avg_speed_mph'] = np.nan
+        df.loc[(df['avg_speed_mph'] < 0.5) & (df['trip_distance'] > 1), 'avg_speed_mph'] = np.nan
+        # 速度分类标记（仅标记，不删除，保留给后续分析判断）
+        # 理由：速度分布范围很广，分段标记便于在分析和问答中按拥堵程度筛选
+        df['speed_category'] = pd.cut(
+            df['avg_speed_mph'],
+            bins=[0, 2, 10, 25, 45, 60, float('inf')],
+            labels=['极度拥堵', '拥堵', '正常', '畅通', '疑似异常', '明显异常'],
+            right=False
+        )
+
+        median_speed = df['avg_speed_mph'].median()
+        print(f"  ✓ avg_speed_mph: 平均行程速度（英里/小时）")
+        print(f"    速度范围: {df['avg_speed_mph'].min():.1f} - {df['avg_speed_mph'].max():.1f} mph")
+        print(f"    中位数速度: {median_speed:.1f} mph")
+        print(f"  ✓ speed_category: 速度分类标记")
+
+        # ============================================
+        # 衍生特征2：人均行程距离 (英里/人)
+        # ============================================
+        # 设计理由：
+        #   1. 反映出租车运力利用效率：单人乘车 vs 多人拼车，道路资源占用不同
+        #   2. 可分析拼车行为模式：高峰时段是否更多人选择拼车？周末拼车增多？
+        #   3. 支撑问答如"多人乘车平均费用比单人低多少？"
+        #   4. 与速度特征互补：速度衡量时间效率，人均距离衡量空间/运力效率
+        print("\n【衍生特征2：人均行程距离】")
+
+        # 人均距离 = 总行程距离 / 乘客数
+        df['avg_distance_per_passenger'] = df['trip_distance'] / df['passenger_count']
+
+        # 人均距离分类
+        # 理由：将人均出行距离分段，便于分析不同出行场景
+        #   短途：<1英里/人，可能是短距离接驳或密集城区内出行
+        #   中短途：1-3英里/人，典型的市区出行距离
+        #   中长途：3-10英里/人，跨区出行
+        #   长途：>10英里/人，机场线或远郊出行
+        df['distance_per_passenger_category'] = pd.cut(
+            df['avg_distance_per_passenger'],
+            bins=[0, 1, 3, 10, float('inf')],
+            labels=['短途', '中短途', '中长途', '长途'],
+            right=False
+        )
+
+        avg_dist = df['avg_distance_per_passenger'].mean()
+        print(f"  ✓ avg_distance_per_passenger: 人均行程距离（英里/人）")
+        print(
+            f"    人均距离范围: {df['avg_distance_per_passenger'].min():.2f} - {df['avg_distance_per_passenger'].max():.2f} 英里/人")
+        print(f"    平均人均距离: {avg_dist:.2f} 英里/人")
+        print(f"  ✓ distance_per_passenger_category: 人均距离分类")
+
+        # ============================================
+        # 特征工程总结
+        # ============================================
+        self.df = df
+        new_features = ['trip_duration_minutes', 'pickup_hour', 'pickup_dayofweek',
+                        'is_weekend', 'is_peak_hour', 'time_period',
+                        'avg_speed_mph', 'speed_category',
+                        'avg_distance_per_passenger', 'distance_per_passenger_category']
+
+        print(f"\n【特征工程总结】")
+        print(f"  新增 {len(new_features)} 个特征字段")
+
+        return df
+
+    def save_cleaned_data(self, filename='yellow_tripdata_2023-01_cleaned.parquet'):
+        """
+        保存清洗和特征工程后的数据
+
+        参数:
+            filename: 输出文件名
+        """
+        filepath = os.path.join(self.output_dir, filename)
+        self.df.to_parquet(filepath, index=False)
+        print(f"\n清洗后的数据已保存至: {filepath}")
+        file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+        print(f"文件大小: {file_size_mb:.1f} MB")
+        print(f"数据量: {len(self.df):,} 条，字段数: {len(self.df.columns)} 个")
+
+    def run(self):
+        """运行完整的数据处理流程（一键调用）"""
+        self.load_data()
+        self.generate_quality_report()
+        self.clean_data()
+        self.engineer_features()
+        self.save_cleaned_data()
+        print("\n" + "=" * 60)
+        print("模块一：数据处理完成！")
+        print("=" * 60)
+        return self.df
+
+
+# ============================================================
+# 模块自测入口（直接运行此文件时执行）
+# ============================================================
+if __name__ == "__main__":
+    import os
+    os.chdir(os.path.dirname(os.path.dirname(__file__)))
+    processor = DataProcessor(data_dir='data', output_dir='outputs')
+    df_clean = processor.run()
