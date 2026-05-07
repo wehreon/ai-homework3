@@ -9,6 +9,7 @@ import numpy as np
 import os
 import re
 import warnings
+from openai import OpenAI
 
 warnings.filterwarnings('ignore')
 
@@ -47,6 +48,11 @@ class QAInterface:
             '晚高峰': ['晚高峰', '傍晚', '晚上'],
             '夜间': ['夜间', '夜里', '今晚']
         }
+        # 大模型API（选做）
+        self.llm_client = OpenAI(
+            api_key=os.environ.get("DEEPSEEK_API_KEY", "sk-48cd2dc2cec24bff9cc19054046c61d8"),
+            base_url="https://api.deepseek.com"
+        )
 
     def load_data(self, df=None, demand_df=None):
         """加载需要的数据"""
@@ -288,22 +294,33 @@ class QAInterface:
     # ============================================================
     # 通用兜底
     # ============================================================
+    def _call_llm(self, question):
+        """调用大模型API兜底回复"""
+        try:
+            response = self.llm_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是纽约市出租车出行数据助手。"
+                            "数据背景：2023年1月，约287万条NYC Yellow Taxi行程。"
+                            "回答尽量简短，3句话以内。"
+                        )
+                    },
+                    {"role": "user", "content": question}
+                ],
+                temperature=0.7,
+                max_tokens=200
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"（大模型暂时不可用: {e}）"
+
     def handle_general(self, question, info):
-        """处理无法精确匹配的问题"""
-        # 尝试给出一些基本统计信息
-        total_trips = len(self.df)
-        avg_fare = self.df['fare_amount'].mean()
-        avg_speed = self.df[self.df['avg_speed_mph'].between(1, 50)]['avg_speed_mph'].mean()
-
-        return (f"我理解您的问题可能有困难。以下是本月数据概览：\n"
-                f"  总行程量: {total_trips:,} 单\n"
-                f"  平均车费: ${avg_fare:.2f}\n"
-                f"  平均速度: {avg_speed:.1f} mph\n"
-                f"您可以尝试：时段查询 | 区域排名 | 拥堵分析 | 费用查询 | 需求预测")
-
-    # ============================================================
-    # 主问答入口
-    # ============================================================
+        """无法匹配规则时，调用大模型"""
+        print("（规则未匹配，调用大模型...）")
+        return self._call_llm(question)
     def ask(self, question):
         """
         问答主入口：接收自然语言问题，返回答案

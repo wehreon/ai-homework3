@@ -1,0 +1,4 @@
+__pycache__/
+*.cpython-*
+outputs/*.parquet
+outputs/*.pkl
