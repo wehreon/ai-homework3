@@ -50,7 +50,7 @@ class QAInterface:
         }
         # 大模型API（选做）
         self.llm_client = OpenAI(
-            api_key=os.environ.get("DEEPSEEK_API_KEY", "sk-48cd2dc2cec24bff9cc19054046c61d8"),
+            api_key=os.environ.get("DEEPSEEK_API_KEY"),
             base_url="https://api.deepseek.com"
         )
 
